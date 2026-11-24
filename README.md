@@ -1,6 +1,9 @@
 # electrocasa-lakehouse
 Plataforma de ingeniería de datos para una cadena de electrodomésticos usando Databricks y arquitectura Medallion.
 
+# electrocasa-lakehouse
+Plataforma de ingeniería de datos para una cadena de electrodomésticos usando Databricks y arquitectura Medallion.
+
 # Evidencias de gobierno y seguridad – ElectroCasa
 
 ## 1. Grupo de Ingeniería
@@ -84,14 +87,6 @@ Estos permisos corresponden al acceso diferenciado esperado para el esquema Gold
 
 ![SHOW GRANTS de Gold](evidencias/09_grants_gold.png)
 
-## Pendiente de completar
-
-- Prueba de enmascaramiento con un usuario que no pertenezca a `electrocasa_ingenieria` (DNI enmascarado y salario oculto).
-- Evidencia de que el propietario/usuario de ejecución del pipeline pertenece a `electrocasa_ingenieria` y de que las tablas derivadas conservan los valores reales.
-- Verificación final de permisos efectivos y evidencias restantes que exija el enunciado.
-
-No se debe afirmar que estas pruebas pendientes ya fueron realizadas.
-
 ## 10. Permisos del esquema Silver
 
 La consulta `SHOW GRANTS ON SCHEMA electrocasa.silver` muestra que `electrocasa_ingenieria` conserva los privilegios `CREATE TABLE`, `MODIFY`, `SELECT` y `USE SCHEMA`.
@@ -133,8 +128,38 @@ Por tanto, las máscaras están definidas tanto en `electrocasa.silver.empleados
 
 ![SHOW CREATE TABLE de Gold con las máscaras](evidencias/13_masks_gold_empleados.png)
 
+## 14. Orquestación del proceso ETL
+
+### Job: `electrocasa_tracking_ingestion job`
+
+Se configuró un Job para ejecutar secuencialmente las siguientes tareas:
+
+1. `setup_y_copy_into`: prepara los esquemas y volúmenes, y ejecuta la carga inicial mediante COPY INTO.
+2. `electrocasa_tracking_ingestion_job`: ejecuta el proceso de ingesta de tracking.
+3. `pipeline_principal`: ejecuta el pipeline ETL principal.
+4. `validacion`: ejecuta las validaciones finales del procesamiento.
+
+La última ejecución completa del Job finalizó con estado **Succeeded**. Las cuatro tareas aparecen conectadas secuencialmente y completadas correctamente.
+
+![Job con las cuatro tareas secuenciales](evidencias/14_job_tareas_secuenciales.png)
+
+### Pipeline: `electrocasa_pipeline`
+
+El pipeline implementa el procesamiento ETL mediante arquitectura Medallion, con las capas Bronze, Silver y Gold.
+
+La última ejecución verificada, realizada el 24 de noviembre de 2026, finalizó con estado **Completed**.
+
+- **Tipo:** ETL pipeline.
+- **Tablas:** 26.
+- **Errores:** 0.
+- **Advertencias:** 0.
+- **Creator, Owner y Run as:** usuario miembro de `electrocasa_ingenieria`.
+
+![Pipeline completado con 26 tablas y sin errores ni advertencias](evidencias/15_pipeline_completado_26_tablas.png)
+
 ## Limitaciones de validación en Databricks Free Edition
 
 No se dispone de un segundo usuario de Databricks para ejecutar una consulta como miembro de `electrocasa_analistas` o `electrocasa_auditoria`. Por ese motivo, no se presenta una captura de la visualización enmascarada desde esos grupos. Las evidencias disponibles muestran la definición de las máscaras y la consulta realizada por un miembro de `electrocasa_ingenieria`, que ve los valores reales.
 
 La pertenencia del usuario de ejecución del pipeline a `electrocasa_ingenieria` se comprobó con `is_account_group_member('electrocasa_ingenieria') = true`, y el pipeline muestra ese mismo usuario en `Owner` y `Run as`.
+
