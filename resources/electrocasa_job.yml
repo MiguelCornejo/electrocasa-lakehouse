@@ -9,7 +9,7 @@ resources:
         # 1. Preparación y cargas COPY INTO
         - task_key: setup_y_copy_into
           notebook_task:
-            notebook_path: ../notebooks/00_setup
+            notebook_path: ../notebooks/00_setup.py
 
         # 2. Ingesta incremental desde SQL Server
         - task_key: tracking_ingestion
@@ -30,4 +30,4 @@ resources:
           depends_on:
             - task_key: pipeline_principal
           notebook_task:
-            notebook_path: ../notebooks/01_validacion
+            notebook_path: ../notebooks/01_validacion.ipynb
