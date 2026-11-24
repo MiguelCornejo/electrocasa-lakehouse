@@ -1,0 +1,33 @@
+
+resources:
+  jobs:
+    electrocasa_job:
+      name: electrocasa_job
+      max_concurrent_runs: 1
+
+      tasks:
+        # 1. Preparación y cargas COPY INTO
+        - task_key: setup_y_copy_into
+          notebook_task:
+            notebook_path: ../notebooks/00_setup
+
+        # 2. Ingesta incremental desde SQL Server
+        - task_key: tracking_ingestion
+          depends_on:
+            - task_key: setup_y_copy_into
+          run_job_task:
+            job_id: 1094507607697773
+
+        # 3. Transformaciones Bronze, Silver y Gold
+        - task_key: pipeline_principal
+          depends_on:
+            - task_key: tracking_ingestion
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.electrocasa_pipeline.id}
+
+        # 4. Validación de resultados
+        - task_key: validacion
+          depends_on:
+            - task_key: pipeline_principal
+          notebook_task:
+            notebook_path: ../notebooks/01_validacion

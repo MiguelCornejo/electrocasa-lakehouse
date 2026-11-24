@@ -1,0 +1,14 @@
+resources:
+  pipelines:
+    electrocasa_pipeline:
+      name: electrocasa_pipeline
+      catalog: ${var.catalog_name}
+      schema: bronze
+      serverless: true
+
+      libraries:
+        - file:
+            path: ../src/electrocasa/transformations/pipeline.py
+
+      configuration:
+        catalog_name: ${var.catalog_name}
