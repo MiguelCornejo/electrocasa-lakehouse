@@ -1,0 +1,112 @@
+fuente: tracking_envios
+version: 1
+ultima_actualizacion: '2026-11-23'
+responsable: Courier, a través de ElectroCasa
+llegada: Azure SQL Database, tabla dbo.TrackingEnvios
+metodo_ingesta: Conector query-based de SQL Server (Lakeflow Connect). Utiliza una Connection de Unity Catalog y una ingesta
+  incremental basada en el cursor fecha_modificacion.
+connection_unity_catalog: electrocasa_sqlserver_connection
+cursor: fecha_modificacion
+modo_historia: append only. Cada fila representa un evento de cambio de estado del envío. Se deben conservar todos los eventos
+  históricos sin sobrescribir los anteriores.
+frecuencia_esperada: Ingesta inicial de los 15,139 eventos y ejecuciones incrementales posteriores para capturar nuevos registros.
+tabla_bronze: electrocasa.bronze.tracking_envios
+tabla_silver: electrocasa.silver.tracking_envios
+llave: evento_id
+depende_de:
+- fuente: ventas
+  columna: venta_id
+columnas:
+- nombre: evento_id
+  tipo: int
+  nulo: false
+  regla: Identificador técnico único del evento. Es la llave primaria del conector.
+- nombre: tracking_id
+  tipo: string
+  nulo: true
+  regla: Identifica el envío. Puede repetirse porque un envío tiene múltiples eventos. No utilizar como llave primaria.
+- nombre: venta_id
+  tipo: string
+  nulo: true
+  regla: Relacionar con electrocasa.silver.ventas. Si la venta no existe, enviar el evento a cuarentena.
+- nombre: courier
+  tipo: string
+  nulo: true
+  regla: Normalizar casing y espacios para consolidar los registros del mismo courier.
+- nombre: estado_entrega
+  tipo: string
+  nulo: true
+  valores_permitidos:
+  - pendiente
+  - en_transito
+  - entregado
+  - devuelto
+  regla: Normalizar variantes de casing y escritura a pendiente, en_transito, entregado o devuelto.
+- nombre: sucursal_origen
+  tipo: string
+  nulo: true
+- nombre: fecha_actualizacion
+  tipo: date
+  nulo: true
+  regla: Fecha de negocio del cambio de estado. Puede ser nula. No utilizar como cursor incremental.
+- nombre: fecha_modificacion
+  tipo: timestamp
+  nulo: false
+  regla: Columna DATETIME2 de origen. Se utiliza como cursor incremental del conector y nunca debe ser nula.
+reglas_de_calidad:
+- nombre: estado_conocido
+  condicion: estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto') después de estandarizar
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_tracking_envios
+  justificacion: Los estados fuera del conjunto definido se registran en cuarentena y no participan en los indicadores de
+    despacho.
+- nombre: venta_existente
+  condicion: venta_id IS NULL OR existe correspondencia en electrocasa.silver.ventas; aplicar la cuarentena solo cuando venta_id
+    esté informado y no exista
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_tracking_envios
+  justificacion: Cuando venta_id está informado debe existir en ventas Silver. Los eventos sin correspondencia se registran
+    en cuarentena; los nulos se conservan si el origen permite ese caso.
+transformaciones_silver:
+- Convertir evento_id a INT.
+- Convertir tracking_id, venta_id, courier, estado_entrega y sucursal_origen a STRING.
+- Convertir fecha_actualizacion a DATE y fecha_modificacion a TIMESTAMP.
+- Normalizar espacios y casing de courier.
+- Normalizar las variantes de escritura de estado_entrega a un conjunto cerrado de estados.
+- Conservar el historial de eventos sin sobrescribir registros anteriores.
+- Deduplicar mensajes reprocesados que representan el mismo cambio de estado aunque tengan distinto evento_id.
+- Identificar mensajes reprocesados mediante tracking_id, estado_entrega normalizado y la fecha de negocio del evento, considerando
+  también la información temporal disponible.
+- Validar la existencia de venta_id contra electrocasa.silver.ventas.
+- Enviar a cuarentena los eventos asociados a ventas inexistentes.
+- Conservar los eventos con fecha_actualizacion nula.
+- Utilizar fecha_modificacion para calcular el tiempo entre el primer estado PENDIENTE y el primer estado ENTREGADO de cada
+  envío.
+- Para el porcentaje de envíos devueltos, considerar los envíos que llegaron a un estado final.
+- Conservar trazabilidad del sistema de origen y fecha de ingesta.
+- Registrar en electrocasa.silver.cuarentena_tracking_envios los estados no reconocidos y las referencias a ventas inexistentes,
+  incluyendo evento_id, tracking_id, regla y motivo.
+- Para detectar reprocesados con distinto evento_id, comparar tracking_id, estado normalizado y marca temporal de negocio
+  disponible; validar que la clave no colapse dos transiciones legítimas antes de deduplicar.
+problemas_conocidos:
+- problema: Courier con casing inconsistente.
+  ejemplo: El mismo courier aparece con diferentes combinaciones de mayúsculas y minúsculas.
+  filas_afectadas: Por determinar mediante exploración de Azure SQL.
+  tratamiento: Normalizar casing y espacios en Silver para consolidar los registros por courier.
+- problema: Estados de entrega con variantes de escritura.
+  ejemplo: En camino, EN_CAMINO y en_transito.
+  filas_afectadas: Por determinar mediante exploración de Azure SQL.
+  tratamiento: Normalizar las variantes a un conjunto cerrado de estados antes de aplicar las reglas de calidad.
+- problema: Mensajes reprocesados con distinto evento_id.
+  ejemplo: El mismo cambio de estado de un tracking_id aparece registrado más de una vez con diferentes evento_id.
+  filas_afectadas: Por determinar mediante exploración de Azure SQL.
+  tratamiento: Identificar el mismo cambio de estado mediante tracking_id, estado normalizado y fecha de negocio. Conservar
+    una sola representación en Silver.
+- problema: Fecha de actualización nula.
+  ejemplo: fecha_actualizacion = NULL.
+  filas_afectadas: Por determinar mediante exploración de Azure SQL.
+  tratamiento: Conservar el evento y utilizar fecha_modificacion para calcular los tiempos de despacho.
+- problema: Venta de origen inexistente.
+  ejemplo: venta_id que no aparece en electrocasa.silver.ventas.
+  filas_afectadas: Por determinar mediante exploración de Azure SQL.
+  tratamiento: Enviar a cuarentena los eventos asociados a ventas inexistentes y conservar el registro original en Bronze.

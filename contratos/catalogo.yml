@@ -1,0 +1,120 @@
+fuente: catalogo
+version: 1
+ultima_actualizacion: '2026-11-22'
+responsable: maestro_de_productos
+llegada: Archivos JSON con un arreglo completo de productos por archivo en /Volumes/electrocasa/default/vol_landing/catalogo/
+metodo_ingesta: COPY INTO. Se utiliza porque son dos snapshots completos y definidos, no archivos de cambios continuos. Requiere
+  multiLine=true para leer el arreglo JSON completo y primitivesAsString=true para evitar conflictos de tipos en Bronze.
+frecuencia_esperada: 'Dos snapshots: 01-03-2026 y 01-08-2026'
+tipo_entrega: Snapshot completo del catálogo en cada archivo. El snapshot de agosto contiene productos nuevos, cambios de
+  precio y productos descontinuados.
+tabla_bronze: electrocasa.bronze.catalogo_raw
+tabla_silver: electrocasa.silver.catalogo
+llave: producto_id + fecha_snapshot
+historizacion: Conservar ambos snapshots mediante una columna técnica fecha_snapshot. No sobrescribir el snapshot anterior.
+  Mantener los cambios de precio y categoría para consultar la evolución histórica. Los productos con activo=false se conservan
+  como descontinuados, no se eliminan.
+columnas:
+- nombre: producto_id
+  tipo: string
+  nulo: false
+- nombre: nombre_producto
+  tipo: string
+  nulo: false
+- nombre: categoria
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - Cocina
+  - Climatización
+  - Electrónica
+  - Entretenimiento
+  - Línea blanca
+- nombre: marca
+  tipo: string
+  nulo: true
+- nombre: precio_lista
+  tipo: decimal(12,2)
+  nulo: false
+  regla: Convertir los valores numéricos y los valores con formato de moneda S/ a DECIMAL(12,2). El precio debe ser mayor
+    que cero.
+- nombre: activo
+  tipo: boolean
+  nulo: false
+  regla: Conservar tanto productos activos como descontinuados. El valor false indica que el producto ya no está activo.
+reglas_de_calidad:
+- nombre: precio_valido
+  condicion: precio_lista IS NOT NULL AND precio_lista > 0
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_catalogo
+  justificacion: Los precios nulos, cero o negativos no son válidos para el maestro de productos. Los registros rechazados
+    deben conservarse en cuarentena con su motivo Los registros rechazados se escriben primero en la cuarentena específica
+    de esta fuente y no se incorporan a Silver.
+- nombre: producto_id_unico_por_snapshot
+  condicion: Una sola fila por combinación (producto_id, fecha_snapshot); detectar duplicados mediante GROUP BY antes de escribir
+    Silver.
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_catalogo
+  justificacion: La llave histórica es producto_id + fecha_snapshot. Los duplicados ambiguos se escriben en cuarentena; no
+    se elige un precio arbitrariamente.
+transformaciones_silver:
+- Leer los archivos JSON como arreglos completos utilizando multiLine=true.
+- Utilizar primitivesAsString=true en la lectura de Bronze para evitar conflictos de tipos entre archivos.
+- Convertir producto_id y nombre_producto a STRING.
+- 'Normalizar categoria eliminando espacios innecesarios y unificando las 17 variantes de escritura en las cinco categorías
+  permitidas: Cocina, Climatización, Electrónica, Entretenimiento y Línea blanca.'
+- Conservar marca como STRING y permitir valores NULL cuando no esté informada.
+- 'Normalizar precio_lista: retirar el prefijo S/, eliminar separadores de miles y convertir el valor a DECIMAL(12,2).'
+- Convertir activo a BOOLEAN.
+- Agregar fecha_snapshot a partir de la fecha identificada en el nombre del archivo.
+- Detectar duplicados de producto_id dentro de cada snapshot. Los registros duplicados con precios distintos se envían a cuarentena
+  para evitar decisiones arbitrarias.
+- Conservar los productos con activo=false como productos descontinuados.
+- Mantener los snapshots de marzo y agosto como registros históricos diferenciados, sin sobrescribir el anterior.
+- Permitir identificar productos nuevos y cambios de precio entre snapshots.
+- La columna técnica fecha_snapshot forma parte de la llave compuesta de Silver y se deriva de la fecha del snapshot indicada
+  en el nombre del archivo.
+- Registrar los rechazos en electrocasa.silver.cuarentena_catalogo con archivo, fecha_snapshot, producto_id, regla y motivo.
+problemas_conocidos:
+- problema: Precio de lista informado como texto con moneda.
+  ejemplo: precio_lista = "S/ 1,299.90"
+  filas_afectadas: 49 en marzo y 41 en agosto
+  tratamiento: Eliminar el prefijo de moneda y normalizar los separadores antes de convertir a DECIMAL(12,2).
+- problema: Precio de lista negativo.
+  ejemplo: precio_lista = -100.00
+  filas_afectadas: 18 en marzo y 14 en agosto
+  tratamiento: Enviar a cuarentena mediante la regla precio_valido.
+- problema: Precio de lista igual a cero.
+  ejemplo: precio_lista = 0
+  filas_afectadas: 13 en marzo y 13 en agosto
+  tratamiento: Enviar a cuarentena mediante la regla precio_valido.
+- problema: Precio de lista nulo.
+  ejemplo: precio_lista = NULL
+  filas_afectadas: 12 en marzo y 24 en agosto
+  tratamiento: Enviar a cuarentena mediante la regla precio_valido.
+- problema: Marca nula.
+  ejemplo: marca = NULL
+  filas_afectadas: 46 en marzo y 48 en agosto
+  tratamiento: Conservar como NULL porque la marca puede no estar informada. No descartar el producto por esta condición.
+- problema: Categoría con variantes de escritura.
+  ejemplo: COCINA, Cocina, cocina, Climatizacion, Climatización, ELECTRONICA, Electrónica
+  filas_afectadas: 17 variantes identificadas en cada snapshot
+  tratamiento: Normalizar las variantes a las cinco categorías permitidas.
+- problema: Productos duplicados en el snapshot de marzo con precios diferentes.
+  ejemplo: producto_id = PRD-00295 aparece con precio_lista = 451.86 y precio_lista = 430.34.
+  filas_afectadas: 25 filas adicionales correspondientes a 25 producto_id duplicados; 24 de esos productos tienen precios
+    distintos.
+  tratamiento: Identificar los registros duplicados dentro del snapshot y enviar los casos ambiguos a cuarentena. No seleccionar
+    un precio arbitrariamente.
+- problema: Productos descontinuados en el snapshot de agosto.
+  ejemplo: activo = false
+  filas_afectadas: '60'
+  tratamiento: Conservar los productos y su estado de descontinuación. No eliminarlos del histórico.
+- problema: Productos nuevos en el snapshot de agosto.
+  ejemplo: producto_id presente en agosto que no aparece en marzo.
+  filas_afectadas: 120 producto_id nuevos
+  tratamiento: Incorporar los nuevos productos al histórico con fecha_snapshot correspondiente a agosto.
+- problema: Cambios de precio entre snapshots.
+  ejemplo: Un mismo producto_id presenta distinto precio_lista en marzo y agosto.
+  filas_afectadas: No cuantificado en esta exploración.
+  tratamiento: Conservar ambos valores asociados a sus respectivas fechas_snapshot para mantener la evolución histórica.

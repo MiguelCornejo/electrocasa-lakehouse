@@ -1,0 +1,105 @@
+fuente: resenas
+version: 1
+ultima_actualizacion: '2026-11-23'
+responsable: experiencia_cliente
+llegada: Archivos JSON Lines incrementales en /Volumes/electrocasa/default/vol_landing/resenas/
+metodo_ingesta: Auto Loader mediante cloudFiles dentro de Lakeflow Spark Declarative Pipelines. Se utiliza porque la fuente
+  llega en archivos incrementales y permite detectar archivos nuevos automáticamente.
+frecuencia_esperada: Por lote, según el calendario de entregas del proyecto
+tabla_bronze: electrocasa.bronze.resenas_raw
+tabla_silver: electrocasa.silver.resenas
+llave: resena_id
+columnas:
+- nombre: resena_id
+  tipo: string
+  nulo: false
+- nombre: producto_id
+  tipo: string
+  nulo: false
+  regla: Validar la existencia del producto en el catálogo. Las reseñas cuyo producto no exista se envían a cuarentena y no
+    participan en los indicadores Gold.
+- nombre: cliente_id
+  tipo: string
+  nulo: false
+- nombre: calificacion
+  tipo: int
+  nulo: true
+  regla: La calificación válida debe estar entre 1 y 5. Los valores 0, 6 y NULL se identifican como inválidos y se excluyen
+    de los indicadores Gold.
+- nombre: comentario
+  tipo: string
+  nulo: true
+- nombre: tags
+  tipo: array<string>
+  nulo: false
+  regla: Normalizar tags nulos como un arreglo vacío. NULL y [] se representan de manera uniforme en Silver.
+- nombre: respuestas
+  tipo: array<struct<autor:string,texto:string,fecha:date>>
+  nulo: false
+  regla: Conservar las respuestas como arreglo de estructuras. Las respuestas sin autor deben identificarse para revisión
+    y no se debe inventar el autor.
+- nombre: fecha_resena
+  tipo: date
+  nulo: false
+- nombre: metadata
+  tipo: variant
+  nulo: false
+  regla: Conservar la estructura variable según el origen app, web o tienda. No aplanar ni descartar atributos específicos
+    de cada origen.
+reglas_de_calidad:
+- nombre: calificacion_en_escala
+  condicion: calificacion IS NOT NULL AND calificacion BETWEEN 1 AND 5
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_resenas
+  justificacion: Las calificaciones nulas o fuera de 1 a 5 se registran en cuarentena y se excluyen de los indicadores Gold;
+    el dato original queda trazable.
+- nombre: producto_existente
+  condicion: producto_id IS NOT NULL AND existe correspondencia en electrocasa.silver.catalogo (validación después del JOIN)
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_resenas
+  justificacion: Una reseña debe estar asociada a un producto conocido. Los productos inexistentes se envían a cuarentena
+    y no participan en los indicadores Gold Los registros rechazados se escriben primero en la cuarentena específica de esta
+    fuente y no se incorporan a Silver.
+transformaciones_silver:
+- Convertir resena_id, producto_id y cliente_id a STRING.
+- Convertir calificacion a INT, conservando los valores inválidos para su identificación y auditoría.
+- Normalizar comentario vacío como NULL.
+- Normalizar tags NULL como array<string> vacío.
+- Conservar respuestas como array de estructuras con autor, texto y fecha.
+- Identificar respuestas sin autor y registrarlas para revisión.
+- Convertir fecha_resena a DATE soportando los formatos yyyy-MM-dd y dd/MM/yyyy.
+- Conservar metadata como VARIANT para soportar las estructuras variables de app, web y tienda.
+- Deduplicar reseñas por resena_id para evitar duplicados entre lotes.
+- Validar la existencia de producto_id contra el catálogo.
+- Conservar trazabilidad de archivo de origen, lote y fecha de ingesta.
+- Registrar en electrocasa.silver.cuarentena_resenas los registros con calificación inválida o producto inexistente, incluyendo
+  resena_id, archivo, regla y motivo.
+problemas_conocidos:
+- problema: Calificaciones fuera de la escala permitida.
+  ejemplo: calificacion = 0, calificacion = 6 y calificacion = NULL.
+  filas_afectadas: 103
+  tratamiento: Identificar mediante la regla calificacion_en_escala. Conservar trazabilidad y excluir de los indicadores Gold.
+- problema: Comentarios nulos o vacíos.
+  ejemplo: comentario = NULL o comentario = ''.
+  filas_afectadas: 114
+  tratamiento: Normalizar cadenas vacías como NULL. La reseña se conserva porque puede contener una calificación válida.
+- problema: Tags nulos en lugar de un arreglo vacío.
+  ejemplo: tags = NULL.
+  filas_afectadas: 89
+  tratamiento: Normalizar NULL como array<string> vacío para mantener un esquema consistente.
+- problema: Respuestas sin autor.
+  ejemplo: Un elemento de respuestas contiene texto y fecha, pero no contiene autor.
+  filas_afectadas: 8
+  tratamiento: Identificar las respuestas incompletas, conservar la información original y registrar el problema para revisión.
+- problema: Producto inexistente en el catálogo.
+  ejemplo: Reseñas cuyo producto_id no aparece en los snapshots del catálogo entregados.
+  filas_afectadas: 113
+  tratamiento: Validar contra el catálogo y enviar las reseñas sin producto conocido a cuarentena.
+- problema: Fechas de reseña con formatos diferentes.
+  ejemplo: 2026-04-17 y 17/04/2026.
+  filas_afectadas: 80
+  tratamiento: Normalizar ambos formatos a DATE mediante conversión tolerante a errores.
+- problema: Reseñas repetidas entre lotes.
+  ejemplo: El mismo resena_id aparece en el lote 1 y vuelve a llegar en el lote 2.
+  filas_afectadas: 80
+  tratamiento: Deduplicar por resena_id en Silver para impedir que las reingestas alteren los indicadores.

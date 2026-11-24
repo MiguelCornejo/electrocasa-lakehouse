@@ -1,0 +1,148 @@
+fuente: ventas
+version: 1
+ultima_actualizacion: '2026-11-22'
+responsable: area_comercial
+llegada: Archivos CSV incrementales por lote en /Volumes/electrocasa/default/vol_landing/ventas/
+metodo_ingesta: Auto Loader mediante cloudFiles dentro de Lakeflow Spark Declarative Pipelines. Se utiliza porque la fuente
+  llega en archivos incrementales por lotes y permite detectar archivos nuevos sin modificar la lógica de ingesta
+frecuencia_esperada: Por lote, según el calendario de entregas del proyecto
+tabla_bronze: electrocasa.bronze.ventas_raw
+tabla_silver: electrocasa.silver.ventas
+llave: venta_id
+columnas:
+- nombre: venta_id
+  tipo: string
+  nulo: false
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+  regla: Si llega vacío, normalizar a SIN_ASIGNAR antes de validar nulabilidad; no rechazar la venta por este motivo.
+- nombre: producto_id
+  tipo: string
+  nulo: false
+  regla: El producto debe existir en el catálogo de Silver. Si no existe, enviar la venta a cuarentena
+- nombre: vendedor_id
+  tipo: string
+  nulo: true
+  regla: Puede ser nulo para ventas del canal ecommerce.
+- nombre: cantidad
+  tipo: integer
+  nulo: false
+  regla: Debe ser mayor que cero.
+- nombre: monto_total
+  tipo: decimal(12,2)
+  nulo: false
+  regla: Debe ser mayor que cero. Normalizar previamente los montos con coma decimal y punto de miles.
+- nombre: metodo_pago
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - PLIN
+  - YAPE
+  - TRANSFERENCIA
+  - EFECTIVO
+  - TARJETA
+- nombre: fecha_venta
+  tipo: date
+  nulo: false
+  regla: Convertir los tres formatos de fecha de origen a DATE.
+- nombre: canal
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - tienda_fisica
+  - ecommerce
+reglas_de_calidad:
+- nombre: monto_positivo
+  condicion: monto_total > 0 AND monto_total IS NOT NULL
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_ventas
+  justificacion: Los montos nulos, cero o negativos no representan ventas válidas para los indicadores financieros. Los registros
+    rechazados se conservan en cuarentena con su fuente y motivo Los registros rechazados se escriben primero en la cuarentena
+    específica de esta fuente y no se incorporan a Silver.
+- nombre: cantidad_positiva
+  condicion: cantidad IS NOT NULL AND cantidad > 0
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_ventas
+  justificacion: Una venta debe representar al menos una unidad vendida. Las cantidades cero no son válidas para calcular
+    unidades ni rankings de productos Los registros rechazados se escriben primero en la cuarentena específica de esta fuente
+    y no se incorporan a Silver.
+- nombre: producto_existente
+  condicion: producto_id IS NOT NULL AND catalogo.producto_id IS NOT NULL (evaluada después del LEFT JOIN con electrocasa.silver.catalogo)
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_ventas
+  justificacion: La existencia se valida mediante un LEFT JOIN con el catálogo Silver; las ventas sin correspondencia se registran
+    en cuarentena y se excluyen de Silver.
+- nombre: fecha_venta_valida
+  condicion: fecha_venta IS NOT NULL
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_ventas
+  justificacion: La fecha es necesaria para calcular los indicadores mensuales. Los tres formatos conocidos se normalizan
+    antes de evaluar la expectativa Los registros rechazados se escriben primero en la cuarentena específica de esta fuente
+    y no se incorporan a Silver.
+transformaciones_silver:
+- Convertir venta_id, sucursal_id, producto_id y vendedor_id a STRING
+- Convertir cantidad a INTEGER.
+- 'Normalizar monto_total: interpretar la coma como separador decimal y el punto como separador de miles cuando corresponda;
+  convertir a DECIMAL(12,2).'
+- Convertir fecha_venta a DATE admitiendo yyyy-MM-dd, dd/MM/yyyy y yyyy-MM-dd'T'HH:mm:ss. Utilizar conversión tolerante para
+  formatos inválidos.
+- Normalizar las 17 variantes de metodo_pago a PLIN, YAPE, TRANSFERENCIA, EFECTIVO y TARJETA.
+- Asignar SIN_ASIGNAR a sucursal_id cuando llegue vacío antes de validar nulabilidad.
+- Conservar vendedor_id nulo para ecommerce.
+- Rechazar ventas físicas sin vendedor_id.
+- Validar producto_id contra el catálogo Silver y enviar referencias inexistentes a cuarentena.
+- Deduplicar por venta_id para evitar duplicados dentro de la tabla Silver cuando un lote anterior vuelva a llegar.
+- Conservar en Silver únicamente registros que cumplan las reglas críticas de calidad.
+- Para cada rechazo, escribir en electrocasa.silver.cuarentena_ventas la fuente, lote/archivo, identificador de venta cuando
+  exista, regla incumplida, motivo y fecha de procesamiento.
+problemas_conocidos:
+- problema: Monto total vacío.
+  ejemplo: monto_total = NULL
+  filas_afectadas: 58
+  tratamiento: Convertir a NULL y enviar a cuarentena mediante monto_positivo
+- problema: Monto total negativo.
+  ejemplo: monto_total = -1602.50
+  filas_afectadas: 41
+  tratamiento: Enviar a cuarentena mediante monto_positivo.
+- problema: Monto total igual a cero.
+  ejemplo: monto_total = 0
+  filas_afectadas: 28
+  tratamiento: Enviar a cuarentena mediante monto_positivo
+- problema: Monto total con coma decimal y, en algunos casos, punto de miles.
+  ejemplo: 3.468,69 y 407,98
+  filas_afectadas: 92
+  tratamiento: Normalizar separadores antes de convertir a DECIMAL(12,2).
+- problema: Cantidad igual a cero.
+  ejemplo: cantidad = 0
+  filas_afectadas: 22
+  tratamiento: Enviar a cuarentena por incumplimiento de cantidad_positiva.
+- problema: Sucursal sin identificar.
+  ejemplo: sucursal_id = vacío
+  filas_afectadas: 32
+  tratamiento: Asignar SIN_ASIGNAR para conservar la venta y permitir su contabilización.
+- problema: Vendedor vacío en ventas de ecommerce.
+  ejemplo: canal = ecommerce y vendedor_id = cadena vacía
+  filas_afectadas: 2056
+  tratamiento: Convertir a NULL y conservar. No se considera un rechazo porque ecommerce no requiere vendedor.
+- problema: Métodos de pago con variantes de escritura.
+  ejemplo: PLIN, Plin, YAPE, Yape, transferencia, TRF, EFV, TC, td
+  filas_afectadas: 6783
+  tratamiento: Normalizar las 17 variantes a los cinco valores permitidos.
+- problema: Fechas con formatos diferentes.
+  ejemplo: 2026-04-13, 13/04/2026 y 2026-04-13T14:30:00
+  filas_afectadas: 6783
+  tratamiento: Convertir los tres formatos a DATE. En el lote 1 se observaron 5446 valores yyyy-MM-dd, 776 valores dd/MM/yyyy
+    y 561 valores yyyy-MM-dd'T'HH:mm:ss.
+- problema: Producto inexistente en el snapshot de catálogo de marzo.
+  ejemplo: producto_id = PRD-91567
+  filas_afectadas: 23
+  tratamiento: Enviar a cuarentena mediante producto_existente.
+- problema: Ventas que vuelven a llegar en lotes posteriores.
+  ejemplo: Una venta del lote anterior vuelve a aparecer con el mismo venta_id.
+  filas_afectadas: No cuantificado en el lote 1; el problema está documentado para lotes posteriores.
+  tratamiento: Deduplicar por venta_id en Silver para impedir que las reingestas alteren los indicadores.
+- problema: Duplicados dentro del primer lote.
+  ejemplo: No se encontraron venta_id repetidos en ventas_lote_01_2026-05-31.csv.
+  filas_afectadas: 0
+  tratamiento: Mantener la deduplicación por venta_id para controlar reingestas futuras.

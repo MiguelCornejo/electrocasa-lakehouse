@@ -1,0 +1,129 @@
+fuente: empleados
+version: 1
+ultima_actualizacion: '2026-11-22'
+responsable: area_recursos_humanos
+llegada: Archivos CSV con encabezado, distribuidos en tres lotes, en /Volumes/electrocasa/default/vol_landing/empleados/
+metodo_ingesta: Auto Loader mediante cloudFiles dentro de Lakeflow Spark Declarative Pipelines. Se utiliza porque los eventos
+  llegan en lotes incrementales y permite detectar archivos nuevos sin modificar la lógica de ingesta
+frecuencia_esperada: Por lote, según el calendario de entregas del proyecto
+tabla_bronze: electrocasa.bronze.empleados_raw
+tabla_silver: electrocasa.silver.empleados
+llave_evento: No existe un identificador único de evento en la fuente. Se debe construir una clave técnica o identificar duplicados
+  mediante las columnas del evento.
+llave_entidad: id_empleado
+historizacion:
+  tipo: SCD Type 2
+  implementacion: Construcción manual de intervalos de vigencia en Silver a partir de los eventos ordenados por fecha_evento
+    y fecha_registro.
+  columnas_de_vigencia:
+  - valid_from
+  - valid_to
+  - is_current
+  orden_de_los_cambios: Ordenar por fecha_evento ascendente y fecha_registro ascendente. Ambas columnas provienen de la fuente.
+  eventos_mismo_dia: Cuando un empleado tiene varios eventos en la misma fecha_evento, utilizar fecha_registro ascendente
+    para determinar el orden de aplicación.
+  llegada_tardia: Incorporar el evento en su posición cronológica utilizando fecha_evento y fecha_registro, recalculando los
+    intervalos de vigencia afectados. No asignar su vigencia según la fecha de llegada del lote.
+columnas:
+- nombre: id_empleado
+  tipo: string
+  nulo: false
+- nombre: nombre
+  tipo: string
+  nulo: false
+- nombre: dni
+  tipo: string
+  nulo: true
+  sensible: true
+  masking: 'mask_dni: mostrar el DNI completo únicamente a usuarios autorizados de RR.HH.; ocultar los dígitos centrales a
+    los demás usuarios.'
+- nombre: email
+  tipo: string
+  nulo: false
+- nombre: salario
+  tipo: decimal(12,2)
+  nulo: true
+  regla: Salario positivo y dentro del rango esperado de 0 a 10000. Los valores superiores deben marcarse para revisión por
+    posible error de orden de magnitud.
+  sensible: true
+  masking: 'mask_salario: mostrar el salario únicamente a usuarios autorizados de RR.HH.; ocultar el valor a usuarios no autorizados.'
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: cargo
+  tipo: string
+  nulo: false
+- nombre: tipo_evento
+  tipo: string
+  nulo: false
+  valores_permitidos:
+  - ALTA
+  - TRANSFERENCIA
+  - CAMBIO_SALARIO
+  - BAJA
+- nombre: fecha_evento
+  tipo: date
+  nulo: false
+- nombre: fecha_registro
+  tipo: timestamp
+  nulo: false
+reglas_de_calidad:
+- nombre: evento_ubicable
+  condicion: id_empleado IS NOT NULL AND fecha_evento IS NOT NULL
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_empleados
+  justificacion: Sin identificador de empleado o fecha_evento no es posible ubicar el evento correctamente en la historia
+    SCD Type 2. El registro se conserva en cuarentena y no participa en la historización Los registros rechazados se escriben
+    primero en la cuarentena específica de esta fuente y no se incorporan a Silver.
+- nombre: salario_en_rango
+  condicion: salario IS NULL OR (salario > 0 AND salario <= 10000)
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_empleados
+  justificacion: Los salarios no nulos fuera del rango esperado se envían a cuarentena y no se usan para actualizar el atributo
+    salarial en Silver hasta revisión. Los salarios nulos se conservan como desconocidos.
+transformaciones_silver:
+- Normalizar tipo_evento a mayúsculas y reemplazar espacios por guion bajo.
+- Estandarizar el evento cese como BAJA.
+- Convertir salario a decimal(12,2).
+- Convertir fecha_evento a DATE y fecha_registro a TIMESTAMP.
+- Conservar DNI como STRING para evitar pérdida de formato o ceros iniciales.
+- Identificar duplicados de eventos antes de construir la historia.
+- Ordenar los eventos por id_empleado, fecha_evento y fecha_registro.
+- Construir intervalos de vigencia SCD Type 2 por cada empleado.
+- Procesar eventos tardíos en su posición histórica y recalcular los intervalos afectados.
+- No utilizar current_timestamp() para determinar el orden de los eventos.
+- Registrar en electrocasa.silver.cuarentena_empleados los eventos no ubicables y los salarios no nulos fuera del rango; incluir
+  id_empleado, fechas de origen, regla y motivo.
+problemas_conocidos:
+- problema: Un empleado aparece varias veces porque cada fila representa un evento laboral.
+  ejemplo: Un mismo id_empleado puede tener ALTA, TRANSFERENCIA, CAMBIO_SALARIO y BAJA.
+  filas_afectadas: 4448
+  tratamiento: Utilizar id_empleado como llave de entidad y construir una historia SCD Type 2.
+- problema: Variantes de escritura en tipo_evento.
+  ejemplo: alta, Alta, ALTA, transferencia, Transferencia, cambio_salario, Cambio Salario, cese.
+  filas_afectadas: 4448
+  tratamiento: Normalizar mayúsculas, espacios y equivalencias. Convertir cese en BAJA y utilizar cuatro valores permitidos.
+- problema: Eventos de un mismo empleado ocurridos el mismo día.
+  ejemplo: Dos eventos con el mismo id_empleado y fecha_evento, cuyo orden se determina mediante fecha_registro.
+  filas_afectadas: 76
+  tratamiento: Ordenar por fecha_evento y fecha_registro para preservar la secuencia histórica.
+- problema: Eventos de llegada tardía.
+  ejemplo: Eventos ocurridos entre junio y agosto que RR.HH. registró recién en octubre y que llegan en el lote 3.
+  filas_afectadas: Por determinar mediante exploración de los tres lotes.
+  tratamiento: Insertar los eventos según fecha_evento y fecha_registro, recalculando los intervalos históricos afectados.
+- problema: DNI vacío.
+  ejemplo: Registros con dni vacío.
+  filas_afectadas: 58
+  tratamiento: Permitir DNI nulo, conservar el evento y aplicar controles de calidad. DNI no es la llave de la entidad.
+- problema: DNI duplicado entre empleados distintos.
+  ejemplo: Un mismo DNI aparece asociado a dos id_empleado diferentes.
+  filas_afectadas: 6 valores de DNI duplicados entre empleados distintos.
+  tratamiento: No utilizar DNI como llave. Marcar los casos para revisión por RR.HH.
+- problema: Fecha del evento vacía.
+  ejemplo: Registros con fecha_evento vacía.
+  filas_afectadas: 38
+  tratamiento: Enviar a cuarentena porque no es posible determinar su posición temporal en la historia.
+- problema: Salarios con valores fuera del rango esperado.
+  ejemplo: Salarios como 246616, 200286 y 310523.
+  filas_afectadas: 21
+  tratamiento: Marcar para revisión y conservar trazabilidad. No corregir automáticamente el valor.

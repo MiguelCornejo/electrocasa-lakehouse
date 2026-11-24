@@ -1,0 +1,92 @@
+fuente: devoluciones
+version: 1
+ultima_actualizacion: '2026-11-23'
+responsable: area_postventa
+llegada: Archivos CSV incrementales con encabezado en /Volumes/electrocasa/default/vol_landing/devoluciones/
+metodo_ingesta: Auto Loader mediante cloudFiles dentro de Lakeflow Spark Declarative Pipelines. Se utiliza porque la fuente
+  llega en archivos incrementales y permite detectar nuevos archivos automáticamente.
+frecuencia_esperada: Por lote, según el calendario de entregas del proyecto
+tabla_bronze: electrocasa.bronze.devoluciones_raw
+tabla_silver: electrocasa.silver.devoluciones
+llave: devolucion_id
+depende_de:
+- fuente: ventas
+  columna: venta_id
+columnas:
+- nombre: devolucion_id
+  tipo: string
+  nulo: false
+- nombre: venta_id
+  tipo: string
+  nulo: false
+  regla: La venta debe existir en electrocasa.silver.ventas. Si el identificador está vacío o no existe, enviar la devolución
+    a cuarentena.
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+- nombre: producto_id
+  tipo: string
+  nulo: false
+- nombre: motivo
+  tipo: string
+  nulo: true
+  regla: Normalizar cadenas vacías como NULL y conservar el registro para trazabilidad.
+- nombre: monto_reembolso
+  tipo: decimal(12,2)
+  nulo: false
+  regla: El importe debe ser mayor o igual a cero y no superar el monto_total de la venta de origen.
+- nombre: fecha_devolucion
+  tipo: date
+  nulo: false
+reglas_de_calidad:
+- nombre: reembolso_valido
+  condicion: monto_reembolso >= 0 AND monto_reembolso <= venta.monto_total (evaluada después del JOIN con electrocasa.silver.ventas)
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_devoluciones
+  justificacion: Primero se enriquece la devolución con el monto_total de su venta. Los reembolsos negativos o superiores
+    al monto de venta se registran en cuarentena y se excluyen de Silver y de ventas netas.
+- nombre: venta_existente
+  condicion: venta_id IS NOT NULL AND existe correspondencia en electrocasa.silver.ventas (validación después del JOIN)
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_devoluciones
+  justificacion: Una devolución debe corresponder a una venta existente. Los registros sin venta identificable no pueden relacionarse
+    correctamente con la operación original Los registros rechazados se escriben primero en la cuarentena específica de esta
+    fuente y no se incorporan a Silver.
+transformaciones_silver:
+- Convertir los identificadores devolucion_id, venta_id, sucursal_id y producto_id a STRING.
+- Convertir monto_reembolso a DECIMAL(12,2).
+- Convertir fecha_devolucion a DATE.
+- Normalizar cadenas vacías de motivo como NULL.
+- Validar que venta_id exista en electrocasa.silver.ventas.
+- Relacionar cada devolución con su venta original para validar el importe reembolsado.
+- Identificar reembolsos negativos o mayores al monto_total de la venta.
+- Deduplicar por devolucion_id para evitar duplicados entre lotes.
+- Conservar trazabilidad del archivo de origen, lote y fecha de ingesta.
+- Excluir devoluciones inválidas del cálculo de ventas netas hasta su revisión.
+- Registrar en electrocasa.silver.cuarentena_devoluciones los venta_id vacíos/inexistentes y los importes inválidos, incluyendo
+  devolucion_id, archivo, regla y motivo.
+problemas_conocidos:
+- problema: Monto de reembolso negativo.
+  ejemplo: devolucion_id = DEV-01720, monto_reembolso = -4574.28.
+  filas_afectadas: 38
+  tratamiento: Identificar mediante la regla reembolso_valido, registrar en cuarentena y excluir del cálculo de ventas netas.
+- problema: Monto de reembolso superior al monto de la venta original.
+  ejemplo: devolucion_id = DEV-02667, venta_id = VTA-017247, reembolso = 1263.46 y monto de venta = 902.47.
+  filas_afectadas: 83
+  tratamiento: Validar contra la venta de origen, registrar en cuarentena y excluir del cálculo de ventas netas hasta su revisión.
+- problema: Motivo de devolución vacío.
+  ejemplo: motivo = ''.
+  filas_afectadas: 71
+  tratamiento: Normalizar el valor vacío como NULL y conservar la devolución.
+- problema: Identificador de venta vacío.
+  ejemplo: venta_id = ''.
+  filas_afectadas: 35
+  tratamiento: Enviar a cuarentena porque no es posible relacionar la devolución con su venta original.
+- problema: Venta de origen inexistente.
+  ejemplo: venta_id con un identificador que no aparece en electrocasa.silver.ventas.
+  filas_afectadas: 57
+  tratamiento: Validar la existencia de la venta y enviar a cuarentena las devoluciones sin correspondencia.
+- problema: Devoluciones repetidas entre lotes.
+  ejemplo: El mismo devolucion_id aparece nuevamente en un lote posterior.
+  filas_afectadas: 60
+  tratamiento: Deduplicar por devolucion_id en Silver para evitar contabilizar dos veces el mismo reembolso.

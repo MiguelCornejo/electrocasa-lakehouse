@@ -1,0 +1,64 @@
+fuente: sucursales
+version: 1
+ultima_actualizacion: '2026-11-23'
+responsable: area_operaciones
+llegada: Archivo CSV único con encabezado en /Volumes/electrocasa/default/vol_landing/sucursales/sucursales.csv
+metodo_ingesta: COPY INTO ejecutado desde una tarea SQL o notebook fuera del pipeline. Se utiliza porque es una fuente de
+  referencia pequeña, estática y entregada en un único archivo. La operación debe ser idempotente para evitar duplicados en
+  reejecuciones.
+frecuencia_esperada: Carga inicial y actualización cuando Operaciones entregue una nueva versión del maestro de sucursales.
+tabla_bronze: electrocasa.bronze.sucursales_raw
+tabla_silver: electrocasa.silver.sucursales
+llave: sucursal_id
+columnas:
+- nombre: sucursal_id
+  tipo: string
+  nulo: false
+  regla: Identificador único de la sucursal.
+- nombre: nombre_sucursal
+  tipo: string
+  nulo: false
+- nombre: distrito
+  tipo: string
+  nulo: false
+- nombre: ciudad
+  tipo: string
+  nulo: false
+  regla: Normalizar espacios y casing para mantener una escritura consistente.
+- nombre: region
+  tipo: string
+  nulo: false
+- nombre: fecha_apertura
+  tipo: date
+  nulo: false
+reglas_de_calidad:
+- nombre: sucursal_id_unico
+  condicion: sucursal_id IS NOT NULL y una sola fila por sucursal_id; detectar duplicados antes de insertar en Silver.
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_sucursales
+  justificacion: La llave debe ser única. Los registros con sucursal_id nulo o duplicado se registran en cuarentena; no se
+    aborta silenciosamente toda la carga.
+- nombre: ciudad_estandarizada
+  condicion: ciudad IS NOT NULL después de trim y normalización de casing
+  politica: drop
+  destino_rechazos: electrocasa.silver.cuarentena_sucursales
+  justificacion: La ciudad se normaliza en Silver; los valores vacíos se registran en cuarentena. Las diferencias de casing
+    no se rechazan.
+transformaciones_silver:
+- Convertir sucursal_id a STRING.
+- Convertir nombre_sucursal, distrito, ciudad y region a STRING.
+- Convertir fecha_apertura a DATE.
+- Eliminar espacios al inicio y al final de las columnas de texto.
+- Normalizar el casing de ciudad mediante INITCAP para unificar nombres como AREQUIPA y Arequipa.
+- Validar que sucursal_id no sea nulo ni esté duplicado.
+- Validar que las regiones pertenezcan al conjunto permitido.
+- Conservar trazabilidad del archivo de origen y fecha de ingesta.
+- Evitar duplicaciones al reejecutar COPY INTO.
+- Registrar en electrocasa.silver.cuarentena_sucursales las filas con sucursal_id nulo/duplicado o atributos obligatorios
+  ausentes, incluyendo archivo, regla y motivo.
+problemas_conocidos:
+- problema: Ciudad con casing inconsistente.
+  ejemplo: sucursal_id S27 tiene ciudad = AREQUIPA y sucursal_id S33 tiene ciudad = PIURA, mientras que otros registros utilizan
+    Arequipa y Piura.
+  filas_afectadas: 2
+  tratamiento: Normalizar el casing mediante INITCAP y eliminar espacios innecesarios antes de escribir en Silver.
